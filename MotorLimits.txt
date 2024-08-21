@@ -1,0 +1,20 @@
+UpperLid:
+Min: 30 (open)
+Zero:110
+Max: 170
+
+LowerLid:
+Min:0 (open)
+Zero:70
+Max:145
+
+EyeballUD
+Min:35
+Zero:105
+Max:180 (looking up)
+
+EyeballLR
+Min:0 (looking left)
+Zero:90
+Max:180
+

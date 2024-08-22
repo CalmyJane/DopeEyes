@@ -575,8 +575,10 @@ void loop() {
   currentMillis = millis();
   blinkled.update();
   uint16_t pupilParams[8] = {0, 255, 0, 255, 100, 0, 50};
-  pupil.update(Pupil::GRADIENT, pupilParams);
+  // pupil.update(Pupil::NOISY_COLOR, pupilParams);
   slaveServer.handleClient();
+  Serial.println("hallo");
+  
 
   if (currentMillis - lastServoUpdateTime >= servoUpdateInterval) {
     lastServoUpdateTime = currentMillis;

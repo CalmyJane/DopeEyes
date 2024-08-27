@@ -8,13 +8,18 @@ Min:0 (open)
 Zero:70
 Max:145
 
-EyeballUD
-Min:35
-Zero:105
-Max:180 (looking up)
-
 EyeballLR
 Min:0 (looking left)
 Zero:90
 Max:180
 
+EyeballUD
+Min:35
+Zero:105
+Max:180 (looking up)
+
+
+LimitedServo servoUpperLid = LimitedServo(27, 30, 110, 170, 1000);
+LimitedServo servoLowerLid = LimitedServo(12, 0, 70, 145, 1000);
+LimitedServo servoEyeLR = LimitedServo(13, 0, 90, 180, 1000);
+LimitedServo servoEyeUD = LimitedServo(14, 35, 105, 180, 1000);

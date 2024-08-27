@@ -174,11 +174,11 @@ void setup() {
 
 void loop() {
   // Example: Gradient mode with rotation
-  uint16_t gradientParams[8] = {255, 100, 0,   // Start color: Red
-                                100, 100, 255,   // End color: Blue
+  uint16_t gradientParams[8] = {255, 0, 0,   // Start color: Red
+                                0, 255, 0,   // End color: Blue
                                 };          
 
-  float rotationSpeed = 8;  // Rotate smoothly at 1 LED per second
+  float rotationSpeed = 1;  // Rotate smoothly at 1 LED per second
 
   myPupil.update(Pupil::GRADIENT, gradientParams, 255, 0, rotationSpeed);
 

@@ -1,101 +1,425 @@
-#include <WiFi.h>
 #include <WebServer.h>
 #include <ESPmDNS.h>
 #include <DNSServer.h>
+#include <ESP32Servo.h>
 #include <map>
 #include <string>
 #include <sstream>
-#include <ESP32Servo.h>
-#include <math.h>
+#include <WiFi.h>
+#include <Arduino.h>
+#include <cmath>
 #include <FastLED.h>
-
-#define PUPIL_LED_COUNT 15
-#define PUPIL_PIN 18
+#include <functional>
 
 
-class WiFiConnector {
+#define PUPIL_LED_COUNT 41  // Number of LEDs in the pupil
+#define PUPIL_PIN 18        // Pin connected to the LED strip
+
+class Pupil {
   private:
-      const char* ssid;
-      const char* password;
-      unsigned long timeout;
-      unsigned long previousMillis;
-      bool connected;
-      
-      void connectToWiFi() {
-          Serial.print("Connecting to WiFi");
-          WiFi.begin(ssid, password);
-          if (WiFi.status() == WL_CONNECTED) {
-              if (!connected) {
-                  Serial.println("Connected to WiFi!");
-                  connected = true;
-              }
-          } else {
-            if(connected){
-              Serial.println("Disconnected from WiFi");
-            }
-            connected = false;
-          }
-      }
+  int params[8] = {0};  // Store integers directly
+  int brightness = 255;
+  int strobe = 0;
+  float rotation = 0;
 
   public:
-      WiFiConnector(const char* ssid, const char* password, unsigned long timeout) 
-          : ssid(ssid), password(password), timeout(timeout), connected(false), previousMillis(0) {}
+    // Enum for different modes
+    enum Mode {
+        STATIC_COLOR,
+        NOISY_COLOR,
+        GRADIENT,
+        NOISE,
+        RAINBOW
+    };
 
-      void begin() {
-          connectToWiFi();
+    // Constructor
+    Pupil() {}
+
+    // Initialize method to be called in setup
+    void begin() {
+      FastLED.addLeds<WS2812, PUPIL_PIN, GRB>(leds, PUPIL_LED_COUNT);
+      FastLED.show();
+      lastUpdateTime = millis();  // Initialize lastUpdateTime
+    }
+
+    // Update function to apply different modes
+    void update() {
+      unsigned long currentTime = millis();
+      float elapsedTime = (currentTime - lastUpdateTime) / 1000.0;  // Convert to seconds
+      lastUpdateTime = currentTime;
+
+      // Update rotation offset
+      rotationOffset += rotation * elapsedTime;
+      while (rotationOffset >= PUPIL_LED_COUNT) rotationOffset -= PUPIL_LED_COUNT;
+      while (rotationOffset < 0) rotationOffset += PUPIL_LED_COUNT;
+
+      int parameters[8] = {0};
+      FastLED.setBrightness(brightness);
+
+      // Copy provided parameters, if any
+      for (int i = 0; i < 8; i++) {
+        parameters[i] = params[i];
       }
 
-      void handle() {
-          unsigned long currentMillis = millis();
-          if(connected){
-
-          } else {
-            if (currentMillis - previousMillis >= timeout) {
-                previousMillis = currentMillis;
-                Serial.println("Attempting to reconnect...");
-                connectToWiFi();
+      switch (currentMode) {
+        case STATIC_COLOR:
+          // Static color mode
+          {
+            CRGB color = CRGB(parameters[0], parameters[1], parameters[2]);
+            for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+              leds[i] = color;
             }
           }
+          break;
 
+        case NOISY_COLOR:
+          // Noisy color mode with smooth transition (wobble)
+          {
+            CRGB baseColor = CRGB(parameters[0], parameters[1], parameters[2]);
+            uint8_t noiseRange = parameters[3];
 
+            for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+              if (leds[i] == targetColors[i]) {
+                int red = constrain(baseColor.r + random8(-noiseRange, noiseRange), 0, 255);
+                int green = constrain(baseColor.g + random8(-noiseRange, noiseRange), 0, 255);
+                int blue = constrain(baseColor.b + random8(-noiseRange, noiseRange), 0, 255);
+
+                targetColors[i] = CRGB(red, green, blue);
+              }
+
+              leds[i] = leds[i].lerp8(targetColors[i], 8);  // 8 is the blend factor (higher is slower)
+            }
+          }
+          break;
+
+        case GRADIENT:
+          // Gradient mode with rotating gradient
+          {
+            CRGB startColor = CRGB(parameters[0], parameters[1], parameters[2]);
+            CRGB endColor = CRGB(parameters[3], parameters[4], parameters[5]);
+
+            for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+              uint8_t colorPosition = map(i, 0, PUPIL_LED_COUNT - 50, 0, 255);
+              colorPosition = (colorPosition + gradientOffset) % 255;
+              CRGB color = blend(startColor, endColor, colorPosition);
+              leds[i] = color;
+            }
+          }
+          break;
+
+        case NOISE:
+          // Noise mode
+          {
+            uint8_t hueRange = parameters[0];
+            uint8_t saturation = parameters[1];
+            uint8_t brightnessParam = parameters[2];
+
+            for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+              uint8_t hue = random8(hueRange);
+              leds[i] = CHSV(hue, saturation, brightnessParam);
+            }
+          }
+          break;
+
+        case RAINBOW:
+          // Rainbow mode
+          {
+            uint8_t speed = parameters[0];  // Speed of the rainbow transition
+
+            gradientOffset = (gradientOffset + speed) % 255;
+
+            for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+              uint8_t hue = ((i * 255 / PUPIL_LED_COUNT) + gradientOffset) % 255;
+              leds[i] = CHSV(hue, 255, 255);
+            }
+          }
+          break;
+
+        default:
+          // Unknown mode, do nothing
+          break;
       }
 
-      bool isConnected() {
-          return WiFi.status() == WL_CONNECTED;
+      // Apply smooth rotation
+      applySmoothRotation();
+
+      // Strobe effect
+      if (strobe > 0) {
+        unsigned long interval = 1000 / strobe;  // Calculate interval in milliseconds based on strobe frequency in Hz
+
+        if (currentTime - lastStrobeTime >= interval) {
+          stroboState = !stroboState;             // Toggle the strobe state
+          lastStrobeTime = currentTime;           // Update the last strobe time
+        }
+
+        if (!stroboState) {
+          fill_solid(leds, PUPIL_LED_COUNT, CRGB::Black);  // Turn off the LEDs (black) for strobe
+        }
       }
 
-      void setReconnectTimeout(unsigned long newTimeout) {
-          timeout = newTimeout;
+      if(blackout){
+        fill_solid(leds, PUPIL_LED_COUNT, CRGB::Black);
       }
+
+      FastLED.show();
+    }
+
+    void setBlackout(bool blck){
+      blackout = blck;
+    }
+
+    void setMode(Mode md){
+      currentMode = md;
+    }
+
+    void changeMode() {
+      // Generate a random index for the mode different from the current one
+      Mode newMode;
+      do {
+        int randomIndex = random(0, sizeof(availableModes) / sizeof(availableModes[0]));
+        newMode = availableModes[randomIndex];
+      } while (newMode == currentMode);
+
+      // Randomize some parameters for fun (these can be tailored as needed)
+      int randomParams[8] = {
+        255, 0, 0, // Random RGB or other values
+        0, 0, 0, // Additional values
+        random(0, 256), random(0, 256)                 // Additional values
+      };
+      int randomBrightness = random(2, 50);     // Random brightness between 50 and 255
+      int randomStrobe = random(0, 20);          // Random strobe frequency
+      float randomRotation = (float)random(-50, 50) / 100.0;  // Random rotation speed
+      setMode(GRADIENT);
+      setParams(randomParams);
+      setBrightness(randomBrightness);
+      setStrobe(0);
+      setRotation(20);
+    }
+
+    // Smooth rotation function
+    void applySmoothRotation() {
+      CRGB tempLeds[PUPIL_LED_COUNT];
+      for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+        float fractionalIndex = (i + rotationOffset);
+        int index = (int)fractionalIndex;
+        float fraction = fractionalIndex - index;
+
+        CRGB color1 = leds[index % PUPIL_LED_COUNT];
+        CRGB color2 = leds[(index + 1) % PUPIL_LED_COUNT];
+
+        tempLeds[i] = blend(color1, color2, (int)(fraction * 255));
+      }
+      for (int i = 0; i < PUPIL_LED_COUNT; i++) {
+        leds[i] = tempLeds[i];
+      }
+    }
+
+    void setParams(int* parms){
+      for (int i = 0; i < 8; i++) {
+        params[i] = parms[i];
+      }
+    }
+
+    void setBrightness(int brght){
+      brightness = brght;
+    }
+
+    void setStrobe(int strb){
+      strobe = strb;
+    }
+
+    void setRotation(float rot){
+      rotation = rot;
+    }
+
+  private:
+    CRGB leds[PUPIL_LED_COUNT];
+    CRGB targetColors[PUPIL_LED_COUNT];  // Target colors for the smooth transition
+    uint8_t gradientOffset = 0;          // Offset to create the rotating gradient
+    bool stroboState = false;            // State to track strobe on/off
+    unsigned long lastStrobeTime = 0;    // Last time the strobe was toggled
+
+    // New variables for rotation
+    float rotationOffset = 0;            // Current rotation position with fractional precision
+    unsigned long lastUpdateTime = 0;    // Last time update() was called
+    bool blackout = false;
+
+    Mode currentMode = STATIC_COLOR;     // Track the current mode
+
+    // Array of available modes
+    Mode availableModes[5] = {STATIC_COLOR, NOISY_COLOR, GRADIENT, NOISE, RAINBOW};
+
+};
+
+
+
+
+enum WaveType {
+    SINE,
+    TRIANGLE,
+    SQUARE,
+    NOISE,
+    SMOOTH_NOISE,
+    SAMPLE_AND_HOLD
+};
+
+class Fgen {
+  private:
+    WaveType waveType;
+    float frequency;
+    float minValue;
+    float maxValue;
+    float dutyCycle;
+    float uncertainty;
+    unsigned long startTime;
+    unsigned long lastFrequencyChangeTime;
+    float currentFrequency;
+    float smoothNoiseValue;
+    float sampleAndHoldValue;
+    unsigned long sampleHoldTime;
+    unsigned long lastSampleTime;
+
+  public:
+    Fgen(WaveType type, float freq, float minVal, float maxVal, float duty = 0.5f, float uncert = 1.0f)
+      : waveType(type), frequency(freq), minValue(minVal), maxValue(maxVal), dutyCycle(duty), uncertainty(uncert),
+        currentFrequency(freq), smoothNoiseValue(0), sampleAndHoldValue(minVal), sampleHoldTime(0), lastSampleTime(0) {
+        startTime = millis();
+        lastFrequencyChangeTime = startTime;
+    }
+
+    float getValue() {
+        unsigned long currentTime = millis();
+        unsigned long elapsedTime = currentTime - startTime;
+
+        // Calculate the period of the current frequency
+        float period = 1000.0f / currentFrequency;
+
+        // Check if it's time to change the frequency
+        if (currentTime - lastFrequencyChangeTime >= period) {
+            // Adjust frequency based on uncertainty
+            currentFrequency = frequency * (1.0f + (uncertainty / 100.0f) * ((float)rand() / RAND_MAX - 0.5f) * 2.0f);
+            if (currentFrequency < 0) currentFrequency = 0; // Ensure frequency doesn't go negative
+            lastFrequencyChangeTime = currentTime;
+        }
+
+        float t = (elapsedTime / 1000.0f) * currentFrequency; // Time in seconds multiplied by current frequency
+        float value = 0.0;
+
+        switch (waveType) {
+            case SINE:
+                value = sin(2.0f * PI * t);
+                value = mapToRange(value);
+                break;
+            
+            case TRIANGLE:
+                // Modify the triangle wave based on the duty cycle
+                value = (t < dutyCycle) ? 
+                    2.0f * (t / dutyCycle) - 1.0f : 
+                    2.0f * ((1.0f - t) / (1.0f - dutyCycle)) - 1.0f;
+                value = mapToRange(value);
+                break;
+            
+            case SQUARE:
+                // Modify the square wave based on the duty cycle
+                value = (fmod(t, 1.0f) < dutyCycle) ? 1.0f : -1.0f;
+                value = mapToRange(value);
+                break;
+
+            case NOISE:
+                value = 2.0f * ((float)rand() / RAND_MAX) - 1.0f; // Random value between -1 and 1
+                value = mapToRange(value);
+                break;
+
+            case SMOOTH_NOISE: {
+                uint16_t timeInput = (uint16_t)(elapsedTime * currentFrequency); // Input for noise function
+                uint8_t noiseValue = inoise8(timeInput);  // Perlin noise value [0, 255]
+                value = map(noiseValue, 0, 255, minValue * 100, maxValue * 100) / 100.0f;  // Map to desired range
+                break;
+            }
+
+            case SAMPLE_AND_HOLD: {
+                if (currentTime - lastSampleTime > sampleHoldTime) {
+                    // Time to sample a new value
+                    sampleAndHoldValue = minValue + ((float)rand() / RAND_MAX) * (maxValue - minValue);
+                    lastSampleTime = currentTime;
+                    // Random time to hold the sample based on the current frequency (converted to milliseconds)
+                    sampleHoldTime = (unsigned long)((1000.0f / currentFrequency) * ((float)rand() / RAND_MAX));
+                }
+                value = sampleAndHoldValue;
+                break;
+            }
+
+            default:
+                value = 0.0;
+                break;
+        }
+
+        return value;
+    }
+
+    void setFreq(float freq){
+      frequency = freq;
+    }
+
+    void setDutyCycle(float duty) {
+        dutyCycle = duty;
+    }
+
+    void setUncertainty(float uncert) {
+        uncertainty = uncert;
+    }
+
+  private:
+    float mapToRange(float value) {
+        // Map the value from -1 to 1 to the desired min and max range
+        return minValue + (value + 1.0f) * 0.5f * (maxValue - minValue);
+    }
 };
 
 class Config {
   public:
+    // Define a callback type
+    using ConfigChangeCallback = std::function<void()>;
+
+  private:
+    ConfigChangeCallback callback;
+
+    // Method to notify all registered callbacks
+    void notifyCallbacks() {
+        callback();
+    }
+
+  public:
     std::map<std::string, double> properties;
 
     Config() {
-      properties["blinkFrequency"] = 1000.0; // Initial frequency in milliseconds
-      properties["eyelidPosition"] = 0; //eyelid position
-      properties["Upperlid.Limit.High"] = 170;
-      properties["Upperlid.Limit.Low"] = 30;
-      properties["Upperlid.Center"] = 110;
-      properties["Upperlid.Setpoint"] = 110;
-      properties["Upperlid.MaxSpeed"] = 1000;
-      properties["Lowerlid.Limit.High"] = 145;
-      properties["Lowerlid.Limit.Low"] = 0;
-      properties["Lowerlid.Center"] = 70;
-      properties["Lowerlid.Setpoint"] = 70;
-      properties["Lowerlid.MaxSpeed"] = 1000;
-      properties["EyeLR.Limit.High"] = 180;
-      properties["EyeLR.Limit.Low"] = 0;
-      properties["EyeLR.Center"] = 90;
-      properties["EyeLR.Setpoint"] = 90;
-      properties["EyeLR.MaxSpeed"] = 1000;
-      properties["EyeUD.Limit.High"] = 180;
-      properties["EyeUD.Limit.Low"] = 35;
-      properties["EyeUD.Center"] = 105;
-      properties["EyeUD.Setpoint"] = 105;
-      properties["EyeUD.MaxSpeed"] = 1000;
+      //Motor config
+      //Toplid
+      properties["Motors.Toplid.Max"] = 170;
+      properties["Motors.Toplid.Min"] = 30;
+      properties["Motors.Toplid.Offset"] = 115;
+      properties["Motors.Toplid.Inverted"] = 0;
+      //Bottom Lid
+      properties["Motors.Bottomlid.Max"] = 145;
+      properties["Motors.Bottomlid.Min"] = 0;
+      properties["Motors.Bottomlid.Offset"] = 40;
+      properties["Motors.Bottomlid.Inverted"] = 0;
+      //Eye Left Right
+      properties["Motors.EyeLR.Max"] = 180;
+      properties["Motors.EyeLR.Min"] = 0;
+      properties["Motors.EyeLR.Offset"] = 0;
+      properties["Motors.EyeLR.Inverted"] = 0;
+      //Eye Up Down
+      properties["Motors.EyeUD.Max"] = 180;
+      properties["Motors.EyeUD.Min"] = 35;
+      properties["Motors.EyeUD.Offset"] = 100;
+      properties["Motors.EyeUD.Inverted"] = 0;
+
+      properties["Arperture"] = 90;
+      
+      properties["BlinkRate"] = 0.3;
+      properties["EyelidsDamping"] = 1;
+      properties["EyelidsOffset"] = 30;
     }
 
     double getProperty(const std::string& name) {
@@ -104,6 +428,12 @@ class Config {
 
     void setProperty(const std::string& name, double value) {
       properties[name] = value;
+      notifyCallbacks();
+    }
+
+    // Method to register callbacks
+    void registerCallback(ConfigChangeCallback cb) {
+      callback = cb;
     }
 
     std::string getHTMLForm() {
@@ -144,9 +474,6 @@ class Config {
         html << "</body></html>";
         return html.str();
     }
-
-
-
 };
 
 class SlaveServerHandler {
@@ -218,23 +545,23 @@ class LimitedServo {
     int lowerLimit;
     int upperLimit;
     int center;
+    int offset;
+    bool inverted;
     int currentAngle;       // Stores the current angle of the servo
-    int targetAngle;        // Stores the target angle
-    int maxVelocity;        // Maximum velocity (degrees per update cycle)
-    unsigned long lastUpdateTime;  // Last time the servo was updated
 
   public:
-    LimitedServo(int pin, int lowerLimit, int center, int upperLimit, int maxVelocity)
-      : pin(pin), lowerLimit(lowerLimit), center(center), upperLimit(upperLimit), 
-        currentAngle(0), targetAngle(0), maxVelocity(maxVelocity), lastUpdateTime(0) {
+    LimitedServo(int pin, int upperLimit, int lowerLimit, int offset, bool inverted = false)
+      : pin(pin), lowerLimit(lowerLimit), upperLimit(upperLimit), offset(offset),
+        currentAngle(0), inverted(inverted)
+        {
+          center = lowerLimit + (upperLimit - lowerLimit) / 2;
           currentAngle = center;
-          targetAngle = center;
+          attach();
         }
 
     void attach() {
         servo.attach(pin);
         currentAngle = center; // Initialize the current angle
-        targetAngle = center;  // Start with the current angle as the target
     }
 
     void detach() {
@@ -242,42 +569,36 @@ class LimitedServo {
     }
 
     void write(int angle) {
-        targetAngle = constrain(angle, lowerLimit, upperLimit); // Set the new target angle within the limits
+        currentAngle = angle; // Set the new target angle within the limits
     }
 
     int read() {
         return currentAngle;
     }
 
-    void setUpperLimit(int uLim){
+    void setMax(int uLim){
       upperLimit = uLim;
     }
 
-    void setLowerLimit(int lLim){
+    void setMin(int lLim){
       lowerLimit = lLim;
     }
 
-    void setMaxVelocity(int maxVel){
-      maxVelocity = maxVel;
+    void setOffset(int oset){
+      offset = oset;
     }
 
-    int getCenter(){
-      return center;
+    void setInverted(bool inv){
+      inverted = inv;
     }
 
     void update() {
-        unsigned long currentTime = millis();
-        unsigned long timeElapsed = currentTime - lastUpdateTime;
+        //apply inversion (=180-x) and offset
+        servo.write(constrain(getFinalAngle(), lowerLimit, upperLimit));
+    }
 
-        int step = maxVelocity * timeElapsed / 1000; // Calculate how much to move based on velocity and time
-        if (currentAngle < targetAngle) {
-            currentAngle = min(currentAngle + step, targetAngle);
-        } else if (currentAngle > targetAngle) {
-            currentAngle = max(currentAngle - step, targetAngle);
-        }
-
-        servo.write(constrain(currentAngle, lowerLimit, upperLimit));
-        lastUpdateTime = currentTime;
+    int getFinalAngle(){
+        return ((inverted?-1:0) * 180) -  (currentAngle + offset) * (inverted?1:-1);
     }
 
     // Debug print method
@@ -286,340 +607,196 @@ class LimitedServo {
         Serial.print(pin);
         Serial.print(", Current Angle: ");
         Serial.print(currentAngle);
-        Serial.print(", Target Angle: ");
-        Serial.print(targetAngle);
         Serial.print(", Lower Limit: ");
         Serial.print(lowerLimit);
         Serial.print(", Upper Limit: ");
         Serial.print(upperLimit);
-        Serial.print(", Max Velocity: ");
-        Serial.println(maxVelocity);
+
     }
 };
 
 class Eyelids {
   private:
-    LimitedServo& upperLid;
-    LimitedServo& lowerLid;
+    int center;   // Center position for both eyelids
+    int aperture; // Aperture of the eyelids
+    int offset;
 
-    int center;   // Center in degrees, relative to 0° (straight forward)
-    int aperture; // Aperture in degrees, 0° to 180°
+    int blinkState = 0;         // 0 = no blink, 1 = closing, 2 = waiting, 3 = opening
+    unsigned long blinkStartTime = 0; // Time when the blink started
+    int blinkDelayTime = 200;   // Duration of the blink (can be adjusted as needed)
+    int previousAperture;       // To store the previous aperture before the blink
 
   public:
-    // Constructor that takes references to the upper and lower lid servos
-    Eyelids(LimitedServo& upper, LimitedServo& lower) 
-      : upperLid(upper), lowerLid(lower), center(0), aperture(0) {} // Initialize with default center and aperture
+    LimitedServo topEyelid;
+    LimitedServo bottomEyelid;
+    Eyelids(int topPin, int bottomPin, int topMin, int topMax, int topOffset, bool topInverted,
+            int bottomMin, int bottomMax, int bottomOffset, bool bottomInverted)
+      : topEyelid(topPin, topMax, topMin, topOffset, topInverted),
+        bottomEyelid(bottomPin, bottomMax, bottomMin, bottomOffset, bottomInverted) {}
 
-    void attach(){
-      upperLid.attach();
-      lowerLid.attach();
+    void setCenter(int newCenter) {
+        center=newCenter;
+        updateServos();
     }
 
-    // Set the center and aperture, adjusting the lid positions accordingly
-    void setCenterAndAperture(int newCenter, int newAperture) {
-        // Clamp the input values to ensure they are within valid ranges
-        center = constrain(newCenter, -90, 90);
+    void setAperture(int newAperture) {
         aperture = constrain(newAperture, 0, 180);
-
-        // Calculate the absolute positions based on the center and aperture
-        int upperLidPosition = upperLid.getCenter() - (aperture / 2) - center;
-        int lowerLidPosition = lowerLid.getCenter() + (aperture / 2) + center;
-
-        // Ensure upper lid is always above lower lid to avoid collision
-        // if (upperLidPosition < lowerLidPosition) {
-        //     int average = (upperLidPosition + lowerLidPosition) / 2;
-        //     upperLidPosition = average;
-        //     lowerLidPosition = average;
-        // }
-        Serial.print("upperLidPosition");
-        Serial.print(upperLidPosition);
-        Serial.print("lowerLidPosition");
-        Serial.println(lowerLidPosition);
-        upperLid.write(upperLidPosition);
-        lowerLid.write(lowerLidPosition);
+        updateServos();
     }
 
-    // Get the current center and aperture as a pair
-    std::pair<int, int> getCenterAndAperture() {
-        int upperLidPosition = upperLid.read();
-        int lowerLidPosition = lowerLid.read();
-        int currentCenter = (upperLidPosition + lowerLidPosition) / 2 - upperLid.getCenter();
-        int currentAperture = upperLidPosition - lowerLidPosition;
-        return {currentCenter, currentAperture};
+    void setOffset(int offs){
+      offset = offs;
     }
 
-    // Update function to be called in the loop to ensure smooth movement
+    void blink(int delayTime = 200) {
+      if (blinkState == 0) {  // Only start a blink if one is not already in progress
+          blinkState = 1;     // Start the blink process
+          blinkDelayTime = delayTime;
+          previousAperture = aperture;  // Save the current aperture
+          setAperture(0);     // Close the eyelids
+          blinkStartTime = millis();  // Record the start time
+      }
+    } 
+
+    void updateServos() {
+        // Calculate the angles for the top and bottom eyelids
+        int topAngle = - (center + offset) - aperture / 2;
+        int bottomAngle = center + offset - aperture / 2;
+
+        // Write the angles to the servos
+        topEyelid.write(topAngle);
+        bottomEyelid.write(bottomAngle);
+    }
+
     void update() {
-        upperLid.update();
-        lowerLid.update();
+        topEyelid.update();
+        bottomEyelid.update();
     }
 
-    // Convenience functions to move eyelids to fully open or closed positions
-    void openEyelids() {
-        setCenterAndAperture(center, 180); // Maximum aperture
+    void debugPrint() {
+        Serial.println("Top Eyelid:");
+        topEyelid.debugPrint();
+        Serial.println("Bottom Eyelid:");
+        bottomEyelid.debugPrint();
+    }
+    
+    bool closed(){
+      return aperture < 1;
     }
 
-    void closeEyelids() {
-        setCenterAndAperture(center, 0); // Minimum aperture
-    }
-
-    // Set the eyelids' positions directly, ensuring they do not collide
-    void setPosition(int upperLidPosition, int lowerLidPosition) {
-        // Ensure that the positions do not cause a collision
-        if (upperLidPosition < lowerLidPosition) {
-            int average = (upperLidPosition + lowerLidPosition) / 2;
-            upperLidPosition = average;
-            lowerLidPosition = average;
-        }
-
-        upperLid.write(upperLidPosition);
-        lowerLid.write(lowerLidPosition);
-    }
-};
-
-class BlinkLED {
-  private:
-    int ledPin;
-    unsigned long lastBlinkTime;
-    unsigned long onTime;
-    unsigned long offTime;
-    bool ledState;
-
-  public:
-    // Constructor to initialize the pin and default settings
-    BlinkLED(int pin) {
-      ledPin = pin;
-      pinMode(ledPin, OUTPUT);
-      lastBlinkTime = 0;
-      onTime = 500; // default on-time in ms
-      offTime = 500; // default off-time in ms
-      ledState = LOW;
-      digitalWrite(ledPin, ledState);
-    }
-
-    // Method to update the blink rate and duty cycle
-    void setBlinkRate(unsigned long frequency, float dutyCycle) {
-      // Frequency is in Hz, dutyCycle is a percentage (0.0 to 1.0)
-      unsigned long period = 1000 / frequency; // total period in ms
-      onTime = period * dutyCycle;
-      offTime = period - onTime;
-    }
-
-    // Method to update the LED state, should be called periodically
-    void update() {
-      unsigned long currentMillis = millis();
-      if (ledState && currentMillis - lastBlinkTime >= onTime) {
-        ledState = LOW;
-        lastBlinkTime = currentMillis;
-        digitalWrite(ledPin, ledState);
-      } else if (!ledState && currentMillis - lastBlinkTime >= offTime) {
-        ledState = HIGH;
-        lastBlinkTime = currentMillis;
-        digitalWrite(ledPin, ledState);
-      }
+    void updateConfig(int topMax, int topMin, int topOffset, bool topInverted, int bottomMax, int bottomMin, int bottomOffset, bool bottomInverted){
+      //TopEyelid update values
+      topEyelid.setMin(topMin);
+      topEyelid.setMax(topMax);
+      topEyelid.setOffset(topOffset);
+      topEyelid.setInverted(topInverted);
+      //bottom eyelid update values
+      bottomEyelid.setMin(bottomMin);
+      bottomEyelid.setMax(bottomMax);
+      bottomEyelid.setOffset(bottomOffset);
+      bottomEyelid.setInverted(bottomInverted);
     }
 };
 
-class Pupil {
-  private:
-    CRGB *leds;
-    uint8_t gradientOffset = 0;  // Offset to create the rotating gradient
 
-  public:
-    // Enum for different modes
-    enum Mode {
-        STATIC_COLOR,
-        NOISY_COLOR,
-        GRADIENT,
-        NOISE
-    };
-
-    // Constructor to initialize the Pupil with the number of LEDs and the pin
-    Pupil() {
-      leds = new CRGB[PUPIL_LED_COUNT];
-      FastLED.addLeds<WS2812, PUPIL_PIN, GRB>(leds, PUPIL_LED_COUNT);
-      FastLED.show();
-    }
-
-    // Update function to apply different modes
-    void update(Mode mode, uint16_t params[8] = nullptr) {
-      uint16_t parameters[8] = {0};
-
-      // Copy provided parameters, if any
-      if (params != nullptr) {
-        for (int i = 0; i < 8; i++) {
-          parameters[i] = params[i];
-        }
-      }
-
-      switch (mode) {
-        case STATIC_COLOR: {
-          // Static color mode
-          CRGB color = CRGB(parameters[0], parameters[1], parameters[2]);
-          fill_solid(leds, PUPIL_LED_COUNT, color);
-          break;
-        }
-        case NOISY_COLOR: {
-          // Noisy color mode
-          CRGB baseColor = CRGB(parameters[0], parameters[1], parameters[2]);
-          for (int i = 0; i < PUPIL_LED_COUNT; i++) {
-            // Apply slight randomization to the color
-            int red = constrain(baseColor.r + random8(-parameters[3], parameters[3]), 0, 255);
-            int green = constrain(baseColor.g + random8(-parameters[3], parameters[3]), 0, 255);
-            int blue = constrain(baseColor.b + random8(-parameters[3], parameters[3]), 0, 255);
-
-            leds[i] = CRGB(red, green, blue);
-          }
-          break;
-        }
-        case GRADIENT: {
-          // Gradient mode with rotating gradient
-          CRGB startColor = CRGB(parameters[0], parameters[1], parameters[2]);
-          CRGB endColor = CRGB(parameters[3], parameters[4], parameters[5]);
-          uint8_t speed = parameters[6];  // Speed of the gradient rotation
-
-          // Calculate the gradient and apply rotation
-          for (int i = 0; i < PUPIL_LED_COUNT; i++) {
-            // Calculate the position within the gradient
-            uint8_t colorIndex = (i + gradientOffset) % PUPIL_LED_COUNT;
-            uint8_t gradientPosition = (colorIndex * 255) / PUPIL_LED_COUNT;
-            leds[i] = blend(startColor, endColor, gradientPosition);
-          }
-
-          // Update the gradient offset for rotation
-          gradientOffset = (gradientOffset + speed) % PUPIL_LED_COUNT;
-
-          break;
-        }
-        case NOISE: {
-          // Noise mode
-          for (int i = 0; i < PUPIL_LED_COUNT; i++) {
-            leds[i] = CHSV(random8(), parameters[0], parameters[1]);
-          }
-          break;
-        }
-        default:
-          // Unknown mode, do nothing
-          break;
-      }
-
-      FastLED.show();
-    }
-
-    // Destructor to free the allocated memory
-    ~Pupil() {
-      delete[] leds;
-    }
-};
 
 const char* ap_ssid = "DopeEye";
 const char* ap_password = "12345678";
-const char* master_ssid = "DopeEyeMaster";
-const char* master_password = "87654321!";
-const int ledPin = 2;  // LED connected to GPIO2 (D2)
-
 Config config; 
 SlaveServerHandler slaveServer(80, &config, ap_ssid, ap_password);
+LimitedServo servoEyeLR = LimitedServo(13,
+                                        config.getProperty("Motors.EyeLR.Max"),
+                                        config.getProperty("Motors.EyeLR.Min"),
+                                        config.getProperty("Motors.EyeLR.Offset"),
+                                        config.getProperty("Motors.EyeLR.Inverted") > 0);
+                                        
+LimitedServo servoEyeUD = LimitedServo(14,
+                                        config.getProperty("Motors.EyeUD.Max"),
+                                        config.getProperty("Motors.EyeUD.Min"),
+                                        config.getProperty("Motors.EyeUD.Offset"),
+                                        config.getProperty("Motors.EyeUD.Inverted") > 0);
 
-WiFiConnector wifi(master_ssid, master_password, 100000);
+Fgen motorMove = Fgen(SAMPLE_AND_HOLD, 0.1, -45, 45);
+Fgen udMove = Fgen(SAMPLE_AND_HOLD, 0.2, -25, 25);
+Fgen smoothNoise = Fgen(TRIANGLE, 0.1, -100, 100);
+Fgen arpertureMove = Fgen(SQUARE, config.getProperty("BlinkRate"), 0, 10, 0.9, 40);
+Fgen arpertureMove2 = Fgen(SINE, config.getProperty("BlinkRate") * 0.37, 0, 90, 50);
+Fgen arpertureMove3 = Fgen(SINE, config.getProperty("BlinkRate") * 0.73, -10, 10, 20);
 
-LimitedServo servoUpperLid = LimitedServo(27, 30, 110, 170, 1000);
-LimitedServo servoLowerLid = LimitedServo(12, 0, 70, 145, 1000);
-LimitedServo servoEyeLR = LimitedServo(13, 0, 90, 180, 1000);
-LimitedServo servoEyeUD = LimitedServo(14, 35, 105, 180, 1000);
+Pupil myPupil;
 
-Eyelids eyelids = Eyelids(servoUpperLid, servoLowerLid);
-Pupil pupil = Pupil();
+bool wasClosed = false;
 
-BlinkLED blinkled = BlinkLED(ledPin);
-
-int currentMillis = millis();
-int lastServoUpdateTime = millis();
-int lastEyelidUpdate = millis();
-int servoUpdateInterval = 20;
-int eyelidUpdateInterval = 20;
-
-unsigned long startTime;
+Eyelids eyelids = Eyelids(27, 12, config.getProperty("Motors.Toplid.Max"), config.getProperty("Motors.Toplid.Min"), 
+                                  config.getProperty("Motors.Toplid.Offset"), config.getProperty("Motors.Toplid.Inverted"),
+                                  config.getProperty("Motors.Bottomlid.Max"), config.getProperty("Motors.Bottomlid.Min"), 
+                                  config.getProperty("Motors.Bottomlid.Offset"), config.getProperty("Motors.Bottomlid.Inverted"));
 
 void setup() {
+  // put your setup code here, to run once:
   Serial.begin(115200);
   delay(100);
-  pinMode(ledPin, OUTPUT);
-
+  //Start Webserver and Access Point
   Serial.println("Setting AP (Access Point)...");
-  WiFi.softAP(ap_ssid, ap_password);
-
   slaveServer.begin();
   IPAddress IP = slaveServer.getIP();
   Serial.print("AP IP address: ");
   Serial.println(IP);
+  config.registerCallback([&]() { configUpdated(); });
 
-  blinkled.setBlinkRate(2, .7);
-
-  // wifi.begin();
-
-  // eyelids.attach();
-  // eyelids.setCenterAndAperture(0, 25); // Initial settings
-  // eyelids.update();
-
-  startTime = millis();
-
-  //Init Servos
-  servoEyeLR.attach();
-  servoEyeUD.attach();
-
+  //Init Motors
+  myPupil.begin();  // Initialize the pupil
+  myPupil.setBrightness(10);
+  configUpdated();
 }
 
 void loop() {
-  static unsigned long lastBlinkTime = 0;
-  currentMillis = millis();
-  blinkled.update();
-  uint16_t pupilParams[8] = {0, 255, 0, 255, 100, 0, 50};
-  // pupil.update(Pupil::NOISY_COLOR, pupilParams);
-  slaveServer.handleClient();
-  Serial.println("hallo");
-  
-
-  if (currentMillis - lastServoUpdateTime >= servoUpdateInterval) {
-    lastServoUpdateTime = currentMillis;
-    servoEyeLR.write(config.getProperty("EyeLR.Setpoint"));
+  // put your main code here, to run repeatedly:
+    slaveServer.handleClient();
+    servoEyeLR.write(90 + motorMove.getValue() + udMove.getValue() * 0.3);
+    servoEyeUD.write(udMove.getValue());
     servoEyeLR.update();
-    servoEyeUD.write(config.getProperty("EyeUD.Setpoint"));
     servoEyeUD.update();
+
+    // Example: Gradient mode with rotation
+    uint16_t gradientParams[8] = {255 - smoothNoise.getValue(), smoothNoise.getValue(), 100 + udMove.getValue(),   // Start color: Red
+                                  200, 255, 0,   // End color: Blue
+                                  };          
+
+    float rotationSpeed = 15;  // Rotate smoothly at 1 LED per second
+
+    myPupil.update();
+    eyelids.setOffset(config.getProperty("EyelidsOffset"));
+    eyelids.setAperture(arpertureMove.getValue()<0.97?0:(arpertureMove2.getValue() + arpertureMove3.getValue()));
+    if(eyelids.closed()){
+      myPupil.setBlackout(true);
+      myPupil.changeMode();
+      wasClosed = true;
+    } else{
+      if(wasClosed){
+        //just opened eyes
+        myPupil.setBlackout(false);
+        wasClosed = false;
+      }
+    }
+    eyelids.setCenter(servoEyeUD.read() * config.getProperty("EyelidsDamping"));
+    eyelids.update();
   }
 
+void configUpdated(){
+  //called when config was updated
+  eyelids.updateConfig(config.getProperty("Motors.Toplid.Max"), config.getProperty("Motors.Toplid.Min"),
+  config.getProperty("Motors.Toplid.Offset"), config.getProperty("Motors.Toplid.Inverted") > 0,
+  config.getProperty("Motors.Bottomlid.Max"), config.getProperty("Motors.Bottomlid.Min"),
+  config.getProperty("Motors.Bottomlid.Offset"), config.getProperty("Motors.Bottomlid.Inverted") > 0);
+  servoEyeLR.setOffset(config.getProperty("Motors.EyeLR.Offset"));
+  servoEyeLR.setInverted(config.getProperty("Motors.EyeLR.Inverted"));
+  servoEyeLR.setMax(config.getProperty("Motors.EyeLR.Max"));
+  servoEyeLR.setMin(config.getProperty("Motors.EyeLR.Min"));
+  servoEyeUD.setOffset(config.getProperty("Motors.EyeUD.Offset"));
+  servoEyeUD.setInverted(config.getProperty("Motors.EyeUD.Inverted"));
+  servoEyeUD.setMax(config.getProperty("Motors.EyeUD.Max"));
+  servoEyeUD.setMin(config.getProperty("Motors.EyeUD.Min"));
 
-
-  //   // Check if it's time to update the eyelids
-  // if (currentMillis - lastEyelidUpdate >= eyelidUpdateInterval) {
-  //   lastEyelidUpdate = currentMillis; // Save the last time we updated
-
-  //   float elapsedTime = (currentMillis - startTime) / 1000.0; // Time in seconds
-
-  //   // Sine wave for center: moves between -20 and +20 degrees
-  //   int center = 20 * sin(2 * PI * 0.1 * elapsedTime); // 0.1 Hz sine wave
-
-  //   // Triangular wave for aperture: varies between 20 and 30 degrees
-  //   float frequency = 0.1; // Frequency of the triangular wave
-  //   int aperture = 25 + 5 * (2 * abs(2 * (elapsedTime * frequency - floor(elapsedTime * frequency + 0.5))) - 1);
-
-  //   // Set the eyelids position
-  //   eyelids.setCenterAndAperture(center, aperture);
-  //   Serial.print("Center: ");
-  //   Serial.print(center);
-  //   Serial.print(", Aperture: ");
-  //   Serial.println(aperture);
-  //   eyelids.setCenterAndAperture(0, 45);
-
-  //   // Update the servos to the new position
-  //   eyelids.update();
-  // }
-
-  // wifi.handle();
-  // if(wifi.isConnected()){
-  //   //wait for commands from master through webserver methods
-  // }
-  // else{
-  //   //play standalone animations and wait for master to connect
-  // }
+  arpertureMove.setFreq(config.getProperty("BlinkRate"));
 }

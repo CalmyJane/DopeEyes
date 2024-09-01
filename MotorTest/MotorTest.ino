@@ -282,7 +282,8 @@ class Config {
     std::map<std::string, double> properties;
 
     Config() {
-      properties["motorSetpoint"] = 90;
+      properties["MotorPin"] = 12;
+      properties["MotorSetpoint"] = 90;
 
     }
 
@@ -334,7 +335,7 @@ class Config {
     }
 };
 
-class SlaveServerHandler {
+class WebserverHandler {
   private:
     WebServer server;
     DNSServer dnsServer;  // Add DNS server for captive portal
@@ -366,12 +367,12 @@ class SlaveServerHandler {
     }
 
   public:
-    SlaveServerHandler(int port, Config* config, String ssid, String pw) : server(port), config(config), ssid(ssid), pw(pw) {}
+    WebserverHandler(int port, Config* config, String ssid, String pw) : server(port), config(config), ssid(ssid), pw(pw) {}
 
     void begin() {
-      server.on("/", HTTP_GET, std::bind(&SlaveServerHandler::handleRoot, this));
-      server.on("/config", HTTP_GET, std::bind(&SlaveServerHandler::handleConfig, this));
-      server.on("/setConfig", HTTP_POST, std::bind(&SlaveServerHandler::handleSetConfig, this));
+      server.on("/", HTTP_GET, std::bind(&WebserverHandler::handleRoot, this));
+      server.on("/config", HTTP_GET, std::bind(&WebserverHandler::handleConfig, this));
+      server.on("/setConfig", HTTP_POST, std::bind(&WebserverHandler::handleSetConfig, this));
       
       // Set up the Wi-Fi as an Access Point
       WiFi.softAP("DopeEye", "12345678");
@@ -403,27 +404,25 @@ class LimitedServo {
     int lowerLimit;
     int upperLimit;
     int center;
+    int offset;
+    bool inverted;
     int currentAngle;       // Stores the current angle of the servo
-    int targetAngle;        // Stores the target angle
-    int maxVelocity;        // Maximum velocity (degrees per update cycle)
-    unsigned long lastUpdateTime;  // Last time the servo was updated
-    bool smoothingEnabled;  // Flag to enable/disable smoothing
-    float smoothingFactor;  // Factor for exponential smoothing
+    int lastAngle;
 
   public:
-    LimitedServo(int pin, int lowerLimit, int center, int upperLimit, int maxVelocity, bool smoothing = false, float smoothingFactor = .1)
-      : pin(pin), lowerLimit(lowerLimit), center(center), upperLimit(upperLimit), 
-        currentAngle(0), targetAngle(0), maxVelocity(maxVelocity), lastUpdateTime(0),
-        smoothingEnabled(smoothing), smoothingFactor(smoothingFactor) {
+    LimitedServo(int pin, int upperLimit, int lowerLimit, int offset, bool inverted = false)
+      : pin(pin), lowerLimit(lowerLimit), upperLimit(upperLimit), offset(offset),
+        currentAngle(0), inverted(inverted)
+        {
+          center = lowerLimit + (upperLimit - lowerLimit) / 2;
           currentAngle = center;
-          targetAngle = center;
+          lastAngle = -1;
           attach();
         }
 
     void attach() {
         servo.attach(pin);
         currentAngle = center; // Initialize the current angle
-        targetAngle = center;  // Start with the current angle as the target
     }
 
     void detach() {
@@ -431,60 +430,43 @@ class LimitedServo {
     }
 
     void write(int angle) {
-        targetAngle = constrain(angle, lowerLimit, upperLimit); // Set the new target angle within the limits
+        currentAngle = angle; // Set the new target angle within the limits
     }
 
     int read() {
         return currentAngle;
     }
 
-    void setUpperLimit(int uLim){
+    void setMax(int uLim){
       upperLimit = uLim;
     }
 
-    void setLowerLimit(int lLim){
+    void setMin(int lLim){
       lowerLimit = lLim;
     }
 
-    void setMaxVelocity(int maxVel){
-      maxVelocity = maxVel;
+    void setOffset(int oset){
+      offset = oset;
     }
 
-    int getCenter(){
-      return center;
-    }
-
-    void setSmoothing(bool enable) {
-        smoothingEnabled = enable;
-    }
-
-    void setSmoothingFactor(float factor) {
-        smoothingFactor = constrain(factor, 0.01, 1.0); // Ensure the factor is within a reasonable range
+    void setInverted(bool inv){
+      inverted = inv;
     }
 
     void update() {
-        unsigned long currentTime = millis();
-        unsigned long timeElapsed = currentTime - lastUpdateTime;
-
-        int step = maxVelocity * timeElapsed / 1000; // Calculate how much to move based on velocity and time
-
-        if (smoothingEnabled) {
-            float delta = targetAngle - currentAngle;
-            if (abs(delta) < 1) { // Close enough to target, directly set the angle
-                currentAngle = targetAngle;
-            } else {
-                currentAngle += delta * smoothingFactor; // Apply exponential smoothing
-            }
-        } else {
-            if (currentAngle < targetAngle) {
-                currentAngle = min(currentAngle + step, targetAngle);
-            } else if (currentAngle > targetAngle) {
-                currentAngle = max(currentAngle - step, targetAngle);
-            }
+        //apply inversion (=180-x) and offset
+        if(currentAngle != lastAngle){
+          servo.write(constrain(getFinalAngle(), lowerLimit, upperLimit));
+          lastAngle = currentAngle;
         }
+    }
 
-        servo.write(constrain(currentAngle, lowerLimit, upperLimit));
-        lastUpdateTime = currentTime;
+    int getFinalAngle(){
+        return ((inverted?-1:0) * 180) - (currentAngle + offset) * (inverted?1:-1);
+    }
+
+    int getPin(){
+      return pin;
     }
 
     // Debug print method
@@ -493,18 +475,11 @@ class LimitedServo {
         Serial.print(pin);
         Serial.print(", Current Angle: ");
         Serial.print(currentAngle);
-        Serial.print(", Target Angle: ");
-        Serial.print(targetAngle);
         Serial.print(", Lower Limit: ");
         Serial.print(lowerLimit);
         Serial.print(", Upper Limit: ");
         Serial.print(upperLimit);
-        Serial.print(", Max Velocity: ");
-        Serial.print(maxVelocity);
-        Serial.print(", Smoothing Enabled: ");
-        Serial.print(smoothingEnabled ? "Yes" : "No");
-        Serial.print(", Smoothing Factor: ");
-        Serial.println(smoothingFactor);
+
     }
 };
 
@@ -512,46 +487,42 @@ class LimitedServo {
 const char* ap_ssid = "DopeEye";
 const char* ap_password = "12345678";
 Config config; 
-SlaveServerHandler slaveServer(80, &config, ap_ssid, ap_password);
-LimitedServo servoEyeLR = LimitedServo(13, 0, 90, 180, 1000);
-LimitedServo servoEyeUD = LimitedServo(14, 45, 90, 135, 1000);
-
-Fgen motorMove = Fgen(SAMPLE_AND_HOLD, 0.1, -30, 30);
-Fgen udMove = Fgen(SAMPLE_AND_HOLD, 0.2, -30, 30);
-Fgen smoothNoise = Fgen(SMOOTH_NOISE, 0.01, -100, 100);
-
-Pupil myPupil;
+WebserverHandler webserver(80, &config, ap_ssid, ap_password);
+Servo servo;
+int servo_pin = 12;
 
 void setup() {
   // put your setup code here, to run once:
   Serial.begin(115200);
-  delay(100);
+  delay(300);
   //Start Webserver and Access Point
   Serial.println("Setting AP (Access Point)...");
-  slaveServer.begin();
-  IPAddress IP = slaveServer.getIP();
+  webserver.begin();
+  IPAddress IP = webserver.getIP();
   Serial.print("AP IP address: ");
   Serial.println(IP);
-  //Init Motors
-  myPupil.begin();  // Initialize the pupil
-
+  //Init Motor
+  servo.attach(servo_pin);
+  servo.write(90);
 }
 
 void loop() {
   // put your main code here, to run repeatedly:
-    slaveServer.handleClient();
-    servoEyeLR.write(90 + motorMove.getValue() + udMove.getValue());
-    servoEyeUD.write(90 + udMove.getValue());
-    servoEyeLR.update();
-    servoEyeUD.update();
+    webserver.handleClient();
+    int pin = config.getProperty("MotorPin");
+    if(servo.attached() && pin != servo_pin){
+      //new pin selected
+      servo.detach();
+      Serial.println("detached servo");
+    }
 
-    // Example: Gradient mode with rotation
-    uint16_t gradientParams[8] = {255 - smoothNoise.getValue(), smoothNoise.getValue(), 0,   // Start color: Red
-                                  200, 255, 0,   // End color: Blue
-                                  };          
+    if(!servo.attached()){
+      servo.attach(pin);
+      servo_pin = pin;
+      Serial.print("attached servo: ");
+      Serial.println(pin);
+    }
 
-    float rotationSpeed = 1;  // Rotate smoothly at 1 LED per second
 
-    myPupil.update(Pupil::STATIC_COLOR, gradientParams, 30, 0, rotationSpeed);
-
-  }
+    servo.write(config.getProperty("MotorSetpoint"));
+}

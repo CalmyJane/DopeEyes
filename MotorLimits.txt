@@ -1,25 +1,34 @@
 UpperLid:
-Min: 30 (open)
-Zero:110
-Max: 170
+Min: 40 (open)
+Max: 150
+Offset: 90
 
 LowerLid:
-Min:0 (open)
-Zero:70
+Min: 45 (open)
 Max:145
+Offset: 90
+
 
 EyeballLR
-Min:0 (looking left)
-Zero:90
-Max:180
+Min:30 (looking left)
+Max:150
+Offset: 100
 
 EyeballUD
-Min:35
-Zero:105
-Max:180 (looking up)
+Min:40
+Max:130 (looking up)
+Offset: 90
 
 
 LimitedServo servoUpperLid = LimitedServo(27, 30, 110, 170, 1000);
 LimitedServo servoLowerLid = LimitedServo(12, 0, 70, 145, 1000);
 LimitedServo servoEyeLR = LimitedServo(13, 0, 90, 180, 1000);
 LimitedServo servoEyeUD = LimitedServo(14, 35, 105, 180, 1000);
+
+
+EyeNrTwo:
+LowerLid:
+Max: 150
+Min: 0
+
+Upper Lid:

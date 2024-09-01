@@ -10,6 +10,7 @@
 #include <cmath>
 #include <FastLED.h>
 #include <functional>
+#include <Preferences.h>
 
 
 #define PUPIL_LED_COUNT 41  // Number of LEDs in the pupil
@@ -251,9 +252,6 @@ class Pupil {
 
 };
 
-
-
-
 enum WaveType {
     SINE,
     TRIANGLE,
@@ -378,56 +376,97 @@ class Fgen {
 
 class Config {
   public:
-    // Define a callback type
     using ConfigChangeCallback = std::function<void()>;
 
   private:
     ConfigChangeCallback callback;
+    Preferences preferences;  // Preferences object for NVS storage
 
-    // Method to notify all registered callbacks
     void notifyCallbacks() {
-        callback();
+        if (callback) {
+            callback();
+        }
     }
 
   public:
     std::map<std::string, double> properties;
 
+    // Constructor
     Config() {
-      //Motor config
-      //Toplid
-      properties["Motors.Toplid.Max"] = 170;
-      properties["Motors.Toplid.Min"] = 30;
-      properties["Motors.Toplid.Offset"] = 115;
-      properties["Motors.Toplid.Inverted"] = 0;
-      //Bottom Lid
-      properties["Motors.Bottomlid.Max"] = 145;
-      properties["Motors.Bottomlid.Min"] = 0;
-      properties["Motors.Bottomlid.Offset"] = 40;
-      properties["Motors.Bottomlid.Inverted"] = 0;
-      //Eye Left Right
-      properties["Motors.EyeLR.Max"] = 180;
-      properties["Motors.EyeLR.Min"] = 0;
-      properties["Motors.EyeLR.Offset"] = 0;
-      properties["Motors.EyeLR.Inverted"] = 0;
-      //Eye Up Down
-      properties["Motors.EyeUD.Max"] = 180;
-      properties["Motors.EyeUD.Min"] = 35;
-      properties["Motors.EyeUD.Offset"] = 100;
-      properties["Motors.EyeUD.Inverted"] = 0;
 
-      properties["Arperture"] = 90;
-      
-      properties["BlinkRate"] = 0.3;
-      properties["EyelidsDamping"] = 1;
-      properties["EyelidsOffset"] = 30;
+    }
+
+    void loadProperties(){
+      // Initialize preferences
+      if (!preferences.begin("config", false)) {
+          Serial.println("Failed to initialize NVS");
+      }
+
+      // Load or set defaults for motor config
+      properties["Motors.Toplid.Max"] = getOrDefault("Motors.Toplid.Max", 150);
+      properties["Motors.Toplid.Min"] = getOrDefault("Motors.Toplid.Min", 40);
+      properties["Motors.Toplid.Offset"] = getOrDefault("Motors.Toplid.Offset", 90);
+      properties["Motors.Toplid.Inverted"] = getOrDefault("Motors.Toplid.Inverted", 0);
+
+      properties["Motors.Bottomlid.Max"] = getOrDefault("Motors.Bottomlid.Max", 145);
+      properties["Motors.Bottomlid.Min"] = getOrDefault("Motors.Bottomlid.Min", 45);
+      properties["Motors.Bottomlid.Offset"] = getOrDefault("Motors.Bottomlid.Offset", 90);
+      properties["Motors.Bottomlid.Inverted"] = getOrDefault("Motors.Bottomlid.Inverted", 0);
+
+      properties["Motors.EyeLR.Max"] = getOrDefault("Motors.EyeLR.Max", 150);
+      properties["Motors.EyeLR.Min"] = getOrDefault("Motors.EyeLR.Min", 30);
+      properties["Motors.EyeLR.Offset"] = getOrDefault("Motors.EyeLR.Offset", 100);
+      properties["Motors.EyeLR.Inverted"] = getOrDefault("Motors.EyeLR.Inverted", 0);
+
+      properties["Motors.EyeUD.Max"] = getOrDefault("Motors.EyeUD.Max", 130);
+      properties["Motors.EyeUD.Min"] = getOrDefault("Motors.EyeUD.Min", 40);
+      properties["Motors.EyeUD.Offset"] = getOrDefault("Motors.EyeUD.Offset", 90);
+      properties["Motors.EyeUD.Inverted"] = getOrDefault("Motors.EyeUD.Inverted", 0);
+
+      // Other properties
+      properties["Arperture"] = getOrDefault("Arperture", 90);
+      properties["BlinkRate"] = getOrDefault("BlinkRate", 0.3);
+      properties["EyelidsDamping"] = getOrDefault("EyelidsDamping", 1);
+      properties["EyelidsOffset"] = getOrDefault("EyelidsOffset", 0);
+
+      Serial.println("Config loaded successfully.");  
+    }
+
+    // Method to get a property or return default if not found in NVS
+    double getOrDefault(const std::string& name, double defaultValue) {
+      if (preferences.isKey(name.c_str())) {
+        double value = preferences.getDouble(name.c_str(), defaultValue);
+        Serial.print("Loaded ");
+        Serial.print(name.c_str());
+        Serial.print(": ");
+        Serial.println(value);
+        return value;
+      } else {
+        Serial.print("Default used for ");
+        Serial.print(name.c_str());
+        Serial.print(": ");
+        Serial.println(defaultValue);
+        return defaultValue;
+      }
     }
 
     double getProperty(const std::string& name) {
       return properties[name];
     }
 
+    // Method to set property and store in NVS
     void setProperty(const std::string& name, double value) {
       properties[name] = value;
+      bool success = preferences.putDouble(name.c_str(), value);  // Store in NVS
+      if (success) {
+        Serial.print("Stored ");
+        Serial.print(name.c_str());
+        Serial.print(": ");
+        Serial.println(value);
+      } else {
+        Serial.print("Failed to store ");
+        Serial.println(name.c_str());
+      }
       notifyCallbacks();
     }
 
@@ -473,6 +512,11 @@ class Config {
         html << "</form>";
         html << "</body></html>";
         return html.str();
+    }
+
+    // Destructor
+    ~Config() {
+      preferences.end();  // Close the preferences to free up NVS
     }
 };
 
@@ -698,7 +742,25 @@ class Eyelids {
     }
 };
 
+class Channels {
+  private:
+    std::map<std::string, double> channelValues;
 
+  public:
+    // Set a channel value
+    void setChannel(const std::string& name, double value) {
+      channelValues[name] = value;
+    }
+
+    // Get a channel value, returns 0.0 if channel does not exist
+    double getChannel(const std::string& name) const {
+      auto it = channelValues.find(name);
+      if (it != channelValues.end()) {
+        return it->second;
+      }
+      return 0.0;
+    }
+};
 
 const char* ap_ssid = "DopeEye";
 const char* ap_password = "12345678";
@@ -716,8 +778,8 @@ LimitedServo servoEyeUD = LimitedServo(14,
                                         config.getProperty("Motors.EyeUD.Offset"),
                                         config.getProperty("Motors.EyeUD.Inverted") > 0);
 
-Fgen motorMove = Fgen(SAMPLE_AND_HOLD, 0.1, -45, 45);
-Fgen udMove = Fgen(SAMPLE_AND_HOLD, 0.2, -25, 25);
+Fgen motorMove = Fgen(SINE, 0.1, -45, 45);
+Fgen udMove = Fgen(SINE, 0.2, -25, 25);
 Fgen smoothNoise = Fgen(TRIANGLE, 0.1, -100, 100);
 Fgen arpertureMove = Fgen(SQUARE, config.getProperty("BlinkRate"), 0, 10, 0.9, 40);
 Fgen arpertureMove2 = Fgen(SINE, config.getProperty("BlinkRate") * 0.37, 0, 90, 50);
@@ -731,57 +793,62 @@ Eyelids eyelids = Eyelids(27, 12, config.getProperty("Motors.Toplid.Max"), confi
                                   config.getProperty("Motors.Toplid.Offset"), config.getProperty("Motors.Toplid.Inverted"),
                                   config.getProperty("Motors.Bottomlid.Max"), config.getProperty("Motors.Bottomlid.Min"), 
                                   config.getProperty("Motors.Bottomlid.Offset"), config.getProperty("Motors.Bottomlid.Inverted"));
+Channels channels;
 
 void setup() {
-  // put your setup code here, to run once:
   Serial.begin(115200);
   delay(100);
-  //Start Webserver and Access Point
-  Serial.println("Setting AP (Access Point)...");
+  config.loadProperties();
+
   slaveServer.begin();
   IPAddress IP = slaveServer.getIP();
   Serial.print("AP IP address: ");
   Serial.println(IP);
+
   config.registerCallback([&]() { configUpdated(); });
 
-  //Init Motors
-  myPupil.begin();  // Initialize the pupil
+  myPupil.begin();
   myPupil.setBrightness(10);
   configUpdated();
 }
 
 void loop() {
-  // put your main code here, to run repeatedly:
-    slaveServer.handleClient();
-    servoEyeLR.write(90 + motorMove.getValue() + udMove.getValue() * 0.3);
-    servoEyeUD.write(udMove.getValue());
-    servoEyeLR.update();
-    servoEyeUD.update();
+  slaveServer.handleClient();
+  stimulateChannels();
 
-    // Example: Gradient mode with rotation
-    uint16_t gradientParams[8] = {255 - smoothNoise.getValue(), smoothNoise.getValue(), 100 + udMove.getValue(),   // Start color: Red
-                                  200, 255, 0,   // End color: Blue
-                                  };          
+  // Read motor channels from the Channels class
+  servoEyeLR.write(channels.getChannel("MotorLR"));
+  servoEyeUD.write(channels.getChannel("MotorUD"));
+  servoEyeLR.update();
+  servoEyeUD.update();
 
-    float rotationSpeed = 15;  // Rotate smoothly at 1 LED per second
-
-    myPupil.update();
-    eyelids.setOffset(config.getProperty("EyelidsOffset"));
-    eyelids.setAperture(arpertureMove.getValue()<0.97?0:(arpertureMove2.getValue() + arpertureMove3.getValue()));
-    if(eyelids.closed()){
-      myPupil.setBlackout(true);
-      myPupil.changeMode();
-      wasClosed = true;
-    } else{
-      if(wasClosed){
-        //just opened eyes
-        myPupil.setBlackout(false);
-        wasClosed = false;
-      }
-    }
-    eyelids.setCenter(servoEyeUD.read() * config.getProperty("EyelidsDamping"));
-    eyelids.update();
+  // Pupil mode channel and parameters
+  int pupilMode = static_cast<int>(channels.getChannel("PupilMode"));
+  myPupil.setMode(static_cast<Pupil::Mode>(pupilMode));
+  
+  int params[8];
+  for (int i = 0; i < 8; ++i) {
+    params[i] = static_cast<int>(channels.getChannel("PupilParam" + std::to_string(i)));
   }
+  myPupil.setParams(params);
+
+  // Pupil brightness
+  myPupil.setBrightness(static_cast<int>(channels.getChannel("PupilBrightness")));
+
+  // Pupil strobe effect
+  myPupil.setStrobe(static_cast<int>(channels.getChannel("PupilStrobe")));
+
+  // Pupil rotation
+  myPupil.setRotation(channels.getChannel("PupilRotation"));
+
+  // Update the pupil
+  myPupil.update();
+
+  // Eyelids control via channels
+  eyelids.setAperture(static_cast<int>(channels.getChannel("EyelidsAperture")));
+  eyelids.setCenter(static_cast<int>(channels.getChannel("EyelidsCenter")));
+  eyelids.update();
+}
 
 void configUpdated(){
   //called when config was updated
@@ -789,6 +856,7 @@ void configUpdated(){
   config.getProperty("Motors.Toplid.Offset"), config.getProperty("Motors.Toplid.Inverted") > 0,
   config.getProperty("Motors.Bottomlid.Max"), config.getProperty("Motors.Bottomlid.Min"),
   config.getProperty("Motors.Bottomlid.Offset"), config.getProperty("Motors.Bottomlid.Inverted") > 0);
+  eyelids.setOffset(static_cast<int>(channels.getChannel("EyelidsOffset")));
   servoEyeLR.setOffset(config.getProperty("Motors.EyeLR.Offset"));
   servoEyeLR.setInverted(config.getProperty("Motors.EyeLR.Inverted"));
   servoEyeLR.setMax(config.getProperty("Motors.EyeLR.Max"));
@@ -799,4 +867,33 @@ void configUpdated(){
   servoEyeUD.setMin(config.getProperty("Motors.EyeUD.Min"));
 
   arpertureMove.setFreq(config.getProperty("BlinkRate"));
+}
+
+void stimulateChannels() {
+  // MotorLR and MotorUD channels using sine waves for smooth movement
+  channels.setChannel("MotorLR", motorMove.getValue());
+  channels.setChannel("MotorUD", udMove.getValue());
+
+  // Pupil mode, switching between different modes
+  channels.setChannel("PupilMode", Pupil::GRADIENT);
+
+  // Stimulate pupil parameters with random noise or sine waves
+  uint16_t gradientParams[8] = {255, 0, 0,   // Start color: Red
+                                0, 255, 0,   // End color: Blue
+                                10, 20};    
+
+  // Set pupil brightness with a sine wave for smooth changes
+  channels.setChannel("PupilBrightness", 10); // Example: smooth brightness change
+
+  // Strobe effect with a sine wave to modulate frequency
+  channels.setChannel("PupilStrobe", 0); // Example: strobe frequency modulation
+
+  // Rotation effect using a sine wave
+  channels.setChannel("PupilRotation", 10); // Example: smooth rotation
+
+  // Eyelid aperture controlled by sine waves
+  channels.setChannel("EyelidsAperture", 90);
+
+  // Eyelid center position control
+  channels.setChannel("EyelidsCenter", udMove.getValue());
 }
